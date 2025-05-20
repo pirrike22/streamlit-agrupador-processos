@@ -1,31 +1,61 @@
 import streamlit as st
 import pandas as pd
+import pdfplumber
+from io import BytesIO
 
-st.title("Agrupador de Processos 📂")
+st.set_page_config(page_title="Gerenciador de Tarefas", page_icon="✅")
 
-uploaded_file = st.file_uploader("Faça o upload da planilha (.xlsx)", type=["xlsx"])
+st.title("Gerenciador de Tarefas em PDF")
 
-if uploaded_file is not None:
-    df = pd.read_excel(uploaded_file)
-    st.write("### Prévia dos dados:")
-    st.dataframe(df.head())
+uploaded_pdf = st.file_uploader("Envie o PDF contendo as tarefas", type=["pdf"])
 
-    required_columns = ["Número do processo", "Órgão"]
-    if all(col in df.columns for col in required_columns):
-        df_grouped = df.groupby("Número do processo").apply(lambda x: x).reset_index(drop=True)
-        st.write("### Dados Agrupados por Número do Processo:")
-        st.dataframe(df_grouped)
+@st.cache_data(show_spinner=False)
+def read_pdf(file_bytes: bytes) -> pd.DataFrame:
+    """Lê tabelas de um PDF retornando um DataFrame."""
+    with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+        df_list = []
+        for page in pdf.pages:
+            for table in page.extract_tables():
+                if table:
+                    df_list.append(pd.DataFrame(table[1:], columns=table[0]))
+        if df_list:
+            return pd.concat(df_list, ignore_index=True)
+    return pd.DataFrame()
 
-        df_count = df.groupby(["Número do processo", "Órgão"]).size().reset_index(name="Quantidade de Repetições")
-        st.write("### Contagem de Repetições por Processo e Órgão:")
-        st.dataframe(df_count)
+if uploaded_pdf is not None:
+    pdf_bytes = uploaded_pdf.read()
+    df = read_pdf(pdf_bytes)
 
-        csv = df_count.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label="Baixar dados agrupados com contagem",
-            data=csv,
-            file_name="dados_agrupados_contagem.csv",
-            mime="text/csv",
-        )
+    if df.empty:
+        st.error("Nenhuma tabela foi encontrada no PDF enviado.")
     else:
-        st.error("A planilha deve conter as colunas 'Número do processo' e 'Órgão'.")
+        st.write("### Todas as Tarefas")
+        st.dataframe(df)
+
+        # Converte a coluna Prazo para datas quando possível
+        if "Prazo" in df.columns:
+            df["Prazo"] = pd.to_datetime(df["Prazo"], errors="coerce")
+
+        with st.sidebar:
+            st.header("Filtros")
+            responsaveis = df["Responsável"].dropna().unique().tolist() if "Responsável" in df.columns else []
+            selected_resp = st.multiselect("Responsável", options=responsaveis, default=responsaveis)
+            prazo_ini = st.date_input("Prazo a partir de")
+            prazo_fim = st.date_input("Prazo até")
+
+        filtered = df.copy()
+        if selected_resp:
+            filtered = filtered[filtered["Responsável"].isin(selected_resp)]
+        if "Prazo" in filtered.columns:
+            if prazo_ini:
+                filtered = filtered[filtered["Prazo"] >= pd.to_datetime(prazo_ini)]
+            if prazo_fim:
+                filtered = filtered[filtered["Prazo"] <= pd.to_datetime(prazo_fim)]
+
+        st.write("### Resultado Filtrado")
+        st.dataframe(filtered)
+
+        csv = filtered.to_csv(index=False).encode("utf-8")
+        st.download_button("Baixar CSV", data=csv, file_name="tarefas_filtradas.csv", mime="text/csv")
+else:
+    st.info("Carregue um PDF para visualizar as tarefas.")
